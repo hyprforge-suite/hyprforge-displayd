@@ -13,9 +13,9 @@ and writes the settled layout out as a static `monitors.lua` so it
 still applies when the daemon is not running.
 
 Part of [Hyprforge](https://github.com/hyprforge-suite/hyprforge), a suite of
-native Hyprland desktop applications. This repository is a split of the
-`crates/hyprforge-displayd` directory there; development happens in the
-monorepo and `sync.sh` keeps this copy in step.
+native Hyprland desktop applications. It appears there as a
+submodule at `crates/hyprforge-displayd`; this repository is where its code
+lives, and pull requests here are welcome.
 
 ## Two things worth knowing before reading the code
 
