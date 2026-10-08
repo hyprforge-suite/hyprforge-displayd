@@ -25,7 +25,8 @@ and 1.6 is 192/120 — and then rejects any scale that does not divide the
 mode cleanly, substituting its own; the failure is a layout that
 silently does not apply. `matching.rs` snaps every scale to one the
 panel can really take before planning a layout around it. The
-monorepo's README has the full account under "Scales are 120ths".
+suite's `docs/displays.md` has the full account under "Scales are
+120ths".
 
 **A saved layout is keyed on a fingerprint, not on connector names.**
 `DP-1` is whichever port something is plugged into today. The
