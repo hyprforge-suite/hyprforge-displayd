@@ -3,6 +3,8 @@
 A monitor-arrangement daemon for Hyprland, and `hyprforge-displayctl` to
 drive it from a script.
 
+![The Displays page in Settings: two monitors side by side on the arrangement canvas](https://raw.githubusercontent.com/hyprforge-suite/hyprforge/main/docs/images/displays.png)
+
 It watches `wlr-output-management`, recognises a set of displays it has
 seen before, and applies the layout you saved for that set. Plug the same
 dock in tomorrow and the monitors come back arranged the way you left
