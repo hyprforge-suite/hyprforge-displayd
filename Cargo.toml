@@ -1,6 +1,6 @@
 [package]
 name = "hyprforge-displayd"
-version = "0.1.10"
+version = "0.1.11"
 edition = "2021"
 license = "MIT"
 description = "A monitor-arrangement daemon for Hyprland: it watches wlr-output-management, recognises a set of displays it has seen before, and applies the layout you saved for it — plus hyprforge-displayctl to drive it from a script."
