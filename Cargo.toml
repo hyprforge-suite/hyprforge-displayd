@@ -36,7 +36,7 @@ hyprforge-core = { version = "0.1", features = ["dbus"] }
 hyprforge-look = "0.1"
 
 # Spelled out rather than inherited, because a standalone crate has no
-# workspace to inherit from. `check.sh`'s dependency-pin step compares
+# workspace to inherit from. `tools/hf check`'s dependency-pin step compares
 # every one of these against the workspace table, so the two cannot
 # drift apart silently.
 zbus = { version = "5.18", default-features = false, features = ["tokio"] }

@@ -12,7 +12,7 @@
 #     for — wlr-output-management, applying a layout, the `hyprctl
 #     monitors -j` fallback — needs a running Hyprland, and there is
 #     none on a hosted runner. Those live checks are tiers in the
-#     monorepo's `check.sh`, run by hand on a machine with a compositor.
+#     monorepo's `tools/hf`, run by hand on a machine with a compositor.
 #   - it never plugs a monitor in. Fingerprinting a set of displays and
 #     recognising it again is the whole product and cannot be exercised
 #     here at all.
