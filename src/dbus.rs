@@ -85,6 +85,18 @@ impl DisplaydService {
             .map_err(to_zbus_error)
     }
 
+    /// What a provisional change changed, one line per output — for the
+    /// keep-or-revert prompt. Empty when nothing is pending.
+    ///
+    /// A method rather than more fields on `RevertPending`: a signal's
+    /// arguments are its signature, and a listener built against the old
+    /// one (the tray, an older Settings) would stop hearing it at all. A
+    /// prompt newer than the daemon asks, hears "unknown method", and
+    /// shows the countdown without a list.
+    async fn pending_changes(&self) -> Vec<String> {
+        self.daemon.pending_changes().await
+    }
+
     /// Keeps a provisional change. No-op when nothing is pending.
     async fn confirm_layout(&self) -> zbus::fdo::Result<()> {
         self.daemon.confirm_layout().await.map_err(to_zbus_error)

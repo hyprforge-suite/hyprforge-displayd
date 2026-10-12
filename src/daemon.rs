@@ -332,6 +332,25 @@ impl Daemon {
         Some(REVERT_WINDOW)
     }
 
+    /// What the provisional change changed, one line per output, for the
+    /// keep-or-revert prompt — the snapshot against what the compositor
+    /// reports now. Empty when nothing is pending, or nothing differs, or
+    /// the live outputs can't be read: the prompt then asks without the
+    /// list, as it always did.
+    pub async fn pending_changes(&self) -> Vec<String> {
+        let before = match self.pending_revert.lock().await.as_ref() {
+            Some(p) if p.armed => p.heads.clone(),
+            _ => return Vec::new(),
+        };
+        match self.backend.list_outputs() {
+            Ok(now) => crate::changes::describe(&before, &now),
+            Err(e) => {
+                tracing::warn!(error = %e, "couldn't read the outputs to describe a pending change");
+                Vec::new()
+            }
+        }
+    }
+
     /// Keeps the provisional change: drops the snapshot so the timer, when
     /// it fires, finds nothing of its generation to roll back.
     pub async fn confirm_layout(&self) -> anyhow::Result<()> {

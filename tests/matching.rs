@@ -553,6 +553,28 @@ async fn explicit_revert_rolls_back_without_waiting() {
     assert!(h.daemon.revert_layout().await.is_err());
 }
 
+/// The prompt's list: while a change is provisional the daemon names
+/// what moved, from the snapshot against the live outputs, and once it is
+/// kept there is nothing left to name.
+#[tokio::test(start_paused = true)]
+async fn a_pending_change_is_described_until_it_is_kept() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    assert!(h.daemon.pending_changes().await.is_empty(), "nothing pending yet");
+
+    let id = h.daemon.profiles().await[0].id.clone();
+    edit_and_apply_reversibly(&h, &id).await;
+    let changes = h.daemon.pending_changes().await;
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert!(changes[0].starts_with("MOCK-1: "), "{changes:?}");
+    assert!(changes[0].contains("to 500, 600"), "{changes:?}");
+
+    h.daemon.confirm_layout().await.unwrap();
+    assert!(h.daemon.pending_changes().await.is_empty());
+}
+
 #[tokio::test(start_paused = true)]
 async fn confirming_when_nothing_is_pending_is_a_no_op() {
     let h = Harness::new();

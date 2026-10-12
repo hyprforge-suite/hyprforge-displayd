@@ -1,4 +1,5 @@
 pub mod backend;
+pub mod changes;
 pub mod daemon;
 pub mod dbus;
 pub mod fingerprint;
