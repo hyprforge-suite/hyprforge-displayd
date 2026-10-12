@@ -6,7 +6,7 @@ use hyprforge_displayd::backend::wlr::WlrBackend;
 use hyprforge_displayd::backend::OutputBackend;
 
 #[test]
-#[ignore]
+#[ignore = "live (the Wayland compositor's protocols): changes nothing"]
 fn connects_and_lists_real_outputs() {
     let backend = WlrBackend::connect().expect("failed to connect to compositor");
     std::thread::sleep(std::time::Duration::from_millis(200));
