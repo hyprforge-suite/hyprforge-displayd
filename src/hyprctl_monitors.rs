@@ -41,10 +41,16 @@ struct HyprctlMonitor {
 pub async fn connector_descriptions() -> HashMap<String, String> {
     // Bounded, like every other subprocess in this project: a wedged
     // compositor must not hold up the daemon that is trying to describe
-    // its monitors.
+    // its monitors. `kill_on_drop` is what makes the bound end the
+    // process and not just the wait: without it the timeout drops the
+    // future and leaves a wedged `hyprctl` running, one more per settle.
     let queried = tokio::time::timeout(
         hyprforge_core::command::TIMEOUT,
-        tokio::process::Command::new("hyprctl").arg("monitors").arg("-j").output(),
+        tokio::process::Command::new("hyprctl")
+            .arg("monitors")
+            .arg("-j")
+            .kill_on_drop(true)
+            .output(),
     )
     .await;
     let output = match queried {
