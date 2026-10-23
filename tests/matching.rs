@@ -1190,3 +1190,165 @@ async fn the_profile_store_still_answers_while_a_layout_is_being_applied() {
     let _ = release.send(());
     applying.await.unwrap().expect("the apply itself should still succeed");
 }
+
+/// Every `RevertResolved` the daemon has emitted so far, in order. Other
+/// signals (settles, `RevertPending`) are skipped: the tests below only ask
+/// how a provisional change was resolved.
+fn revert_resolutions(h: &mut Harness) -> Vec<bool> {
+    let mut seen = Vec::new();
+    while let Ok(signal) = h.signal_rx.try_recv() {
+        if let DaemonSignal::RevertResolved { reverted } = signal {
+            seen.push(reverted);
+        }
+    }
+    seen
+}
+
+/// `displayctl apply` and the plain `ApplyProfile` are irreversible by
+/// contract — a CLI caller has no banner to click. Made while another
+/// change was still provisional, the old snapshot used to stay armed, and
+/// its timer then restored the layout from before *both*: the scripted
+/// apply was undone a few seconds later by a countdown it never started.
+#[tokio::test(start_paused = true)]
+async fn an_irreversible_apply_is_not_undone_by_an_earlier_changes_countdown() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let id = h.daemon.profiles().await[0].id.clone();
+
+    edit_and_apply_reversibly(&h, &id).await;
+    settle().await;
+    tokio::time::advance(Duration::from_secs(2)).await;
+    settle().await;
+
+    // The user has moved on: a script applies the profile outright.
+    h.daemon.apply_profile(&id).await.unwrap();
+
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW * 2).await;
+    settle().await;
+
+    assert_eq!(
+        h.backend.list_outputs().unwrap()[0].position,
+        (500, 600),
+        "an irreversible apply was rolled back by a countdown it did not start"
+    );
+    assert_eq!(h.daemon.profiles().await[0].heads[0].x, 500);
+    // The prompt still showing for the earlier change has to hear that it
+    // is over, and that what is on screen was kept.
+    assert_eq!(revert_resolutions(&mut h), vec![false]);
+}
+
+/// "Save & Apply" pressed twice inside one countdown keeps the original
+/// deadline (and the original snapshot), so the second call must say how
+/// long is actually left rather than a fresh full window the timer will
+/// not honour — a prompt counting down from 12 that reverts at 7.
+#[tokio::test(start_paused = true)]
+async fn a_second_reversible_apply_reports_the_time_actually_left() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let id = h.daemon.profiles().await[0].id.clone();
+
+    let first = h.daemon.apply_profile_reversible(&id).await.unwrap();
+    assert_eq!(first, 12);
+
+    settle().await;
+    tokio::time::advance(Duration::from_secs(5)).await;
+    settle().await;
+
+    let second = h.daemon.apply_profile_reversible(&id).await.unwrap();
+    assert_eq!(second, 7, "the timer still fires at the first deadline");
+}
+
+/// The timer's `RevertResolved { reverted: true }` tells the prompt the
+/// old layout is back. When the restore failed, it is not, and saying it
+/// is leaves the user looking at the layout they rejected while the
+/// Settings app says it was undone.
+#[tokio::test(start_paused = true)]
+async fn a_revert_that_could_not_be_restored_is_not_reported_as_reverted() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let id = h.daemon.profiles().await[0].id.clone();
+
+    edit_and_apply_reversibly(&h, &id).await;
+
+    // Make the store unwritable, as in the persist test above: restore
+    // writes the profile list first and fails there.
+    let path = h.storage_path();
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    std::fs::write(path.parent().unwrap(), b"not a directory").unwrap();
+
+    settle().await;
+    tokio::time::advance(REVERT_WINDOW + Duration::from_secs(1)).await;
+    settle().await;
+
+    assert_eq!(revert_resolutions(&mut h), vec![false]);
+}
+
+/// `SetHeadGeometry` persists what it is given, and every later hotplug
+/// applies it. A NaN or zero scale, or a negative mode, is a profile the
+/// compositor cannot take and the daemon would retry on every settle.
+/// Zero width, height and refresh stay accepted: they are what a profile
+/// stores for a head that had no mode when it was learned (a disabled
+/// one), and the Settings app sends every head's stored values back.
+#[tokio::test(start_paused = true)]
+async fn head_geometry_that_no_compositor_could_apply_is_refused() {
+    let mut h = Harness::new();
+    h.backend.set_topology(vec![identity("BOE", "0x0BC9", "")]);
+    tokio::time::advance(Duration::from_millis(50)).await;
+    h.next_signal().await;
+    let id = h.daemon.profiles().await[0].id.clone();
+    let before = h.daemon.profiles().await[0].heads[0].clone();
+
+    let bad: [(i32, i32, i32, f64); 7] = [
+        (1920, 1080, 60000, f64::NAN),
+        (1920, 1080, 60000, f64::INFINITY),
+        (1920, 1080, 60000, 0.0),
+        (1920, 1080, 60000, -1.0),
+        (-1920, 1080, 60000, 1.0),
+        (1920, -1080, 60000, 1.0),
+        (1920, 1080, -60000, 1.0),
+    ];
+    for (width, height, refresh, scale) in bad {
+        let result = h
+            .daemon
+            .set_head_geometry(
+                &id,
+                "MOCK-1",
+                0,
+                0,
+                width,
+                height,
+                refresh,
+                scale,
+                hyprforge_displayd::types::Transform::Normal,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "{width}x{height}@{refresh} scale {scale} was stored"
+        );
+    }
+    assert_eq!(h.daemon.profiles().await[0].heads[0], before);
+
+    h.daemon
+        .set_head_geometry(
+            &id,
+            "MOCK-1",
+            0,
+            0,
+            0,
+            0,
+            0,
+            1.0,
+            hyprforge_displayd::types::Transform::Normal,
+        )
+        .await
+        .expect("a head with no recorded mode can still be saved");
+}

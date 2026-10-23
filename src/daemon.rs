@@ -36,7 +36,10 @@ pub enum DaemonSignal {
     },
     /// A provisional change stopped being provisional: either the user kept
     /// it (`reverted: false`) or it was rolled back, by the timer expiring
-    /// or an explicit request (`reverted: true`).
+    /// or an explicit request (`reverted: true`). An irreversible apply
+    /// made meanwhile counts as keeping it, and a rollback that failed
+    /// reads `false` too: `reverted` says what is on screen, not what was
+    /// attempted.
     RevertResolved {
         reverted: bool,
     },
@@ -90,6 +93,11 @@ struct PendingRevert {
     /// False until a timer is actually running (the snapshot is taken at the
     /// first mutation, which may be several D-Bus calls before the apply).
     armed: bool,
+    /// When the running timer fires, once armed. Kept so a second apply
+    /// inside the same countdown can say how long is really left — the
+    /// timer keeps its first deadline, so answering with a fresh
+    /// [`REVERT_WINDOW`] had the prompt promise seconds it never got.
+    deadline: Option<tokio::time::Instant>,
     /// When it was captured, so an unarmed one can expire. See
     /// [`SNAPSHOT_FRESHNESS`].
     taken_at: tokio::time::Instant,
@@ -286,6 +294,7 @@ impl Daemon {
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
                 + 1,
             armed: false,
+            deadline: None,
             taken_at: tokio::time::Instant::now(),
         });
     }
@@ -313,9 +322,15 @@ impl Daemon {
             }
             let p = pending.as_mut()?;
             if p.armed {
-                return Some(REVERT_WINDOW);
+                // What the running timer will actually allow, not a fresh
+                // window: it was started by the first apply and does not
+                // move. `deadline` is always set alongside `armed`.
+                return p
+                    .deadline
+                    .map(|d| d.saturating_duration_since(tokio::time::Instant::now()));
             }
             p.armed = true;
+            p.deadline = Some(tokio::time::Instant::now() + REVERT_WINDOW);
             p.generation
         };
 
@@ -369,10 +384,15 @@ impl Daemon {
         let Some(pending) = pending else {
             anyhow::bail!("no layout change is pending confirmation");
         };
-        self.restore(pending).await?;
-        self.emit(DaemonSignal::RevertResolved { reverted: true })
-            .await;
-        Ok(())
+        // The snapshot is spent either way, so the prompt has to hear that
+        // the change is resolved — and, when the restore failed, that what
+        // is on screen is still the change, not the old layout.
+        let restored = self.restore(pending).await;
+        self.emit(DaemonSignal::RevertResolved {
+            reverted: restored.is_ok(),
+        })
+        .await;
+        restored
     }
 
     /// Timer callback. Does nothing unless the snapshot still in place is
@@ -390,11 +410,17 @@ impl Daemon {
             return;
         };
         tracing::info!("layout change was not confirmed in time; reverting");
-        if let Err(e) = self.restore(pending).await {
-            tracing::error!(error = %e, "failed to revert layout");
-        }
-        self.emit(DaemonSignal::RevertResolved { reverted: true })
-            .await;
+        // `reverted` reports what happened, not what was attempted: it used
+        // to be `true` regardless, so a restore that failed told the prompt
+        // the old layout was back while the rejected one stayed on screen.
+        let reverted = match self.restore(pending).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to revert layout");
+                false
+            }
+        };
+        self.emit(DaemonSignal::RevertResolved { reverted }).await;
     }
 
     /// Commits `plan` to the compositor, one at a time.
@@ -450,7 +476,31 @@ impl Daemon {
     /// Force-applies `profile_id` regardless of whether it currently
     /// matches the connected fingerprint — used by `apply <profile-id>`
     /// and the D-Bus `ApplyProfile` method.
+    ///
+    /// Irreversible, and it settles any change still provisional: see
+    /// [`Daemon::apply_profile_inner`].
     pub async fn apply_profile(&self, profile_id: &str) -> anyhow::Result<()> {
+        self.apply_profile_inner(profile_id, false).await
+    }
+
+    /// The apply shared by both entry points. `reversible` decides what
+    /// happens to the revert snapshot.
+    ///
+    /// A reversible apply takes one (or keeps the one the edit before it
+    /// took) for [`Daemon::arm_revert`] to start the countdown on.
+    ///
+    /// An irreversible one *discards* any snapshot, armed or not. Leaving it
+    /// in place was the bug: a `displayctl apply` made while a GUI change
+    /// was still provisional left that change's timer running, and when it
+    /// fired it restored the layout from before both — undoing an apply
+    /// that is irreversible by contract, seconds after the script that made
+    /// it had exited. The user has moved on from the provisional change, so
+    /// it reads as kept (`RevertResolved { reverted: false }`), which is
+    /// also what dismisses a prompt still counting down for it. Discarded
+    /// before the commit, not after: the timer could otherwise take the
+    /// snapshot while this commit holds the gate and restore it the moment
+    /// the gate is released.
+    async fn apply_profile_inner(&self, profile_id: &str, reversible: bool) -> anyhow::Result<()> {
         let heads = self.backend.list_outputs()?;
         let profiles = self.profiles.lock().await;
         let idx = profiles
@@ -458,10 +508,18 @@ impl Daemon {
             .position(|p| p.id == profile_id)
             .ok_or_else(|| anyhow::anyhow!("no such profile: {profile_id}"))?;
 
-        self.ensure_revert_snapshot(&profiles).await;
-
         let plan = build_layout_plan(&profiles[idx], &heads);
         plan.validate()?;
+
+        if reversible {
+            self.ensure_revert_snapshot(&profiles).await;
+        } else {
+            let discarded = self.pending_revert.lock().await.take();
+            if discarded.is_some_and(|p| p.armed) {
+                self.emit(DaemonSignal::RevertResolved { reverted: false })
+                    .await;
+            }
+        }
         // Same reasoning as `restore`: this commit is our own, so its echo
         // must not read as the user externally rearranging their displays.
         // Without this, the settle that follows compares the *pre-commit*
@@ -576,6 +634,7 @@ impl Daemon {
         scale: f64,
         transform: Transform,
     ) -> anyhow::Result<()> {
+        check_head_geometry(width, height, refresh_mhz, scale)?;
         let mut profiles = self.profiles.lock().await;
         self.ensure_revert_snapshot(&profiles).await;
         let profile = profiles
@@ -985,9 +1044,13 @@ impl Daemon {
     /// which is what a scripted `displayctl apply` wants — a CLI caller has
     /// no banner to click and shouldn't have their change silently undone.
     pub async fn apply_profile_reversible(self: &Arc<Self>, profile_id: &str) -> anyhow::Result<u32> {
-        self.apply_profile(profile_id).await?;
-        self.arm_revert().await;
-        Ok(REVERT_WINDOW.as_secs() as u32)
+        self.apply_profile_inner(profile_id, true).await?;
+        // The time the running timer really allows: a second apply inside
+        // one countdown keeps the first deadline. `None` (no snapshot could
+        // be taken) keeps the old answer; that the change is then not
+        // reversible at all is logged where it is decided.
+        let left = self.arm_revert().await.unwrap_or(REVERT_WINDOW);
+        Ok(left.as_secs() as u32)
     }
 
     /// Writes the profile store, logging and returning any failure.
@@ -1084,6 +1147,27 @@ impl DaemonPaths {
             greet_monitors_path: dir.join("greet-monitors.lua"),
         }
     }
+}
+
+/// Refuses head geometry no compositor could apply, before it is stored.
+///
+/// Whatever `SetHeadGeometry` stores is applied on every later hotplug, so
+/// a NaN or zero scale, or a negative mode, became a profile the daemon
+/// would push at the compositor — and retry — indefinitely.
+///
+/// Zero width, height and refresh are deliberately *accepted*: they are
+/// what [`Profile::from_heads`] records for a head that had no mode when it
+/// was learned (a disabled one), and the Settings app sends every head's
+/// stored values back when it saves, so refusing zero would make any
+/// profile with a disabled head unsaveable.
+pub fn check_head_geometry(width: i32, height: i32, refresh_mhz: i32, scale: f64) -> anyhow::Result<()> {
+    if !scale.is_finite() || scale <= 0.0 {
+        anyhow::bail!("a display's scale must be a positive number, not {scale}");
+    }
+    if width < 0 || height < 0 || refresh_mhz < 0 {
+        anyhow::bail!("a display mode cannot be negative: {width}x{height} at {refresh_mhz} mHz");
+    }
+    Ok(())
 }
 
 /// Turns a live snapshot back into an applicable plan. Used only to restore

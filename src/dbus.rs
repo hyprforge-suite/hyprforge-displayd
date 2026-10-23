@@ -165,6 +165,11 @@ impl DisplaydService {
     ) -> zbus::fdo::Result<()> {
         let transform = Transform::from_str(transform)
             .map_err(|_| zbus::fdo::Error::InvalidArgs(format!("unknown transform: {transform}")))?;
+        // Checked here as well as in the daemon so a bad value is the
+        // caller's mistake on the bus (`InvalidArgs`), not a `Failed` that
+        // reads like the daemon broke.
+        crate::daemon::check_head_geometry(width, height, refresh_mhz, scale)
+            .map_err(|e| zbus::fdo::Error::InvalidArgs(e.to_string()))?;
         self.daemon
             .set_head_geometry(
                 profile_id,
