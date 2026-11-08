@@ -478,7 +478,7 @@ impl Daemon {
     /// and the D-Bus `ApplyProfile` method.
     ///
     /// Irreversible, and it settles any change still provisional: see
-    /// [`Daemon::apply_profile_inner`].
+    /// `Daemon::apply_profile_inner`.
     pub async fn apply_profile(&self, profile_id: &str) -> anyhow::Result<()> {
         self.apply_profile_inner(profile_id, false).await
     }
